@@ -25,16 +25,16 @@ def listen_loop(sock):
 
 
 def start_p2p():
-    room_id = input("enter room id").strip()
+    room_id = input("enter room id: ").strip()
     if not room_id:
-        print("specify room ID")
+        print("room ID not specified")
         return
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(('0.0.0.0', LOCAL_PORT))
 
-    print(f"Connecting to Matchmaker for Room: {room_id}...")
+    print(f"Connecting to server for room: {room_id}...")
     reg_msg = f"HELLO:{room_id}"
     sock.sendto(reg_msg.encode(), (MATCHMAKER_IP, MATCHMAKER_PORT))
 
@@ -45,13 +45,13 @@ def start_p2p():
 
     threading.Thread(target=listen_loop, args=(sock,), daemon=True).start()
 
-    print(f"Connected to room. Starting Port Shotgun on {ip}:{base_port}...")
+    print(f"Server connection through {base_port}. Port scan on {ip}")
     for i in range(10):
         for offset in range(-2, 6):
             sock.sendto(b"__portscan__", (ip, base_port + offset))
         time.sleep(0.3)
 
-    print(f"--- READY (Room: {room_id}) ---")
+    print(f"---READY(Room:{room_id})---")
     while True:
         msg = input("You: ")
         if msg.lower() == 'exit': break
