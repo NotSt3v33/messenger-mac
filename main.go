@@ -17,20 +17,35 @@ func main() {
 }
 
 func startReceiver() {
-	// 'tcp4' is the key to avoiding iSH networking errors
 	ln, err := net.Listen("tcp4", ":8080")
 	if err != nil {
-		fmt.Printf("Startup Error: %v\n", err)
+		fmt.Printf("Fatal Listener Error: %v\n", err)
 		return
 	}
-	fmt.Println("Listening on port 8080... (Waiting for Mac)")
+	fmt.Println("Listening on port 8080...")
 
 	for {
-		conn, _ := ln.Accept()
-		message, _ := bufio.NewReader(conn).ReadString('\n')
-		fmt.Printf("Incoming: %s", message)
-		conn.Close()
+		conn, err := ln.Accept()
+		if err != nil {
+			// This is where it was failing before!
+			fmt.Printf("Accept failed (probably accept4 error): %v\n", err)
+			continue
+		}
+
+		// SAFETY: Only read if conn is NOT nil
+		if conn != nil {
+			go handleConn(conn)
+		}
 	}
+}
+
+func handleConn(conn net.Conn) {
+	defer conn.Close()
+	message, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		return
+	}
+	fmt.Printf("Incoming: %s", message)
 }
 
 func startSender(ip string) {
