@@ -1,6 +1,5 @@
 package main
 
-// Imports
 import (
 	"bufio"
 	"fmt"
@@ -9,59 +8,41 @@ import (
 )
 
 func main() {
-	// RECEIVER MODE (iPhone)
+	// 1. Check if we should be a Sender or Receiver
 	if len(os.Args) == 1 {
-		port := ":8080"
-		ln, err := net.Listen("tcp", port)
-		if err != nil {
-			fmt.Printf("Error starting listener: %v\n", err)
-			return
-		}
-		fmt.Printf("iPhone is listening on %s...\n", port)
-
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				fmt.Printf("Error accepting connection: %v\n", err)
-				continue // Don't crash, just wait for the next attempt
-			}
-
-			// Handle the connection
-			go func(c net.Conn) {
-				defer c.Close()
-				fmt.Printf("\n[Incoming connection from %s]\n", c.RemoteAddr())
-
-				reader := bufio.NewReader(c)
-				message, err := reader.ReadString('\n')
-				if err != nil {
-					fmt.Printf("Error reading message: %v\n", err)
-					return
-				}
-				fmt.Printf("Received: %s", message)
-			}(conn)
-		}
+		startReceiver()
+	} else {
+		startSender(os.Args[1])
 	}
+}
 
-	// SENDER MODE (Mac)
-	if len(os.Args) > 1 {
-		target := os.Args[1] + ":8080"
-		fmt.Printf("Connecting to %s...\n", target)
-
-		conn, err := net.Dial("tcp", target)
-		if err != nil {
-			fmt.Printf("Could not connect to iPhone: %v\n", err)
-			return
-		}
-		defer conn.Close()
-
-		fmt.Print("Enter message: ")
-		text, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-
-		_, err = fmt.Fprintf(conn, text)
-		if err != nil {
-			fmt.Printf("Failed to send: %v\n", err)
-		} else {
-			fmt.Println("Message sent successfully!")
-		}
+func startReceiver() {
+	// 'tcp4' is the key to avoiding iSH networking errors
+	ln, err := net.Listen("tcp4", ":8080")
+	if err != nil {
+		fmt.Printf("Startup Error: %v\n", err)
+		return
 	}
+	fmt.Println("Listening on port 8080... (Waiting for Mac)")
+
+	for {
+		conn, _ := ln.Accept()
+		message, _ := bufio.NewReader(conn).ReadString('\n')
+		fmt.Printf("Incoming: %s", message)
+		conn.Close()
+	}
+}
+
+func startSender(ip string) {
+	conn, err := net.Dial("tcp4", ip+":8080")
+	if err != nil {
+		fmt.Printf("Connection Failed: %v\n", err)
+		return
+	}
+	defer conn.Close()
+
+	fmt.Print("Message: ")
+	msg, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	fmt.Fprintf(conn, msg)
+	fmt.Println("Sent!")
 }
