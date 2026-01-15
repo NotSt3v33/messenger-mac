@@ -29,24 +29,29 @@ def listen_loop(sock):
     while True:
         try:
             data, addr = sock.recvfrom(4096)
-            if peer_info["addr"] != addr:
+
+            # If we receive a Public Key, store it in peer_info
+            if data.startswith(b"PUB:"):
+                peer_info["raw_pub_key"] = data[4:]
+                # Update address just in case it's different
                 peer_info["addr"] = addr
+                continue
 
-            # If it's a handshake packet, ignore it here (handled in start_p2p)
-            if data.startswith(b"PUB:"): continue
-            if b"__portscan__" in data: continue
+            if b"__portscan__" in data:
+                continue
 
-            # Decrypt message
             if peer_info["cipher"]:
                 try:
                     decrypted = peer_info["cipher"].decrypt(data).decode()
                     print(f"\r[Peer]: {decrypted}\nYou: ", end="", flush=True)
                 except:
                     pass
-            else:
-                print(f"\r[Peer (Unencrypted)]: {data.decode()}\nYou: ", end="", flush=True)
         except:
             break
+
+
+# Add "raw_pub_key" to your global dictionary at the top
+peer_info = {"addr": None, "cipher": None, "raw_pub_key": None}
 
 
 def start_p2p():
@@ -59,7 +64,6 @@ def start_p2p():
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
-    print("Keys generated.")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -70,48 +74,34 @@ def start_p2p():
     ip, port = data.decode('utf-8').split(":")
     peer_info["addr"] = (ip, int(port))
 
+    # Start the listener BEFORE we start the handshake loop
     threading.Thread(target=listen_loop, args=(sock,), daemon=True).start()
 
-    print("Performing secure handshake (waiting for peer)...")
-    peer_public_key_raw = None
-    sock.settimeout(1.0)  # Check for peer key every 1 second
+    print("Performing secure handshake...")
 
-    # LOOP UNTIL SUCCESS: This keeps the Mac waiting for the slow iPhone
-    while not peer_public_key_raw:
+    # LOOP UNTIL the listen_loop catches the key
+    while peer_info["raw_pub_key"] is None:
         for offset in range(-2, 6):
             target = (ip, int(port) + offset)
-            # Send our key to the peer
             sock.sendto(b"PUB:" + public_key, target)
             sock.sendto(b"__portscan__", target)
 
-        try:
-            # Try to catch the peer's key
-            response, _ = sock.recvfrom(4096)
-            if response.startswith(b"PUB:"):
-                peer_public_key_raw = response[4:]
-                # Send a confirmation so the other side knows we're done
-                sock.sendto(b"PUB:" + public_key, peer_info["addr"])
-                break
-        except socket.timeout:
-            print("Still waiting for peer...")
-            continue
-        except Exception as e:
-            print(f"Handshake error: {e}")
-            break
+        print("Waiting for peer key...")
+        time.sleep(1)  # Wait 1 second before blasting the ports again
 
-    # Finalize Encryption
-    peer_public_key = serialization.load_pem_public_key(peer_public_key_raw)
+    # Finalize Encryption using the key the listener caught
+    peer_public_key = serialization.load_pem_public_key(peer_info["raw_pub_key"])
     shared_secret = private_key.exchange(peer_public_key)
     peer_info["cipher"] = Fernet(derive_key(shared_secret))
 
-    sock.settimeout(None)
     print(f"--- SECURE CHANNEL ESTABLISHED (Room:{room_id}) ---")
 
     while True:
         msg = input("You: ")
         if msg.lower() == 'exit': break
-        encrypted = peer_info["cipher"].encrypt(msg.encode())
-        sock.sendto(encrypted, peer_info["addr"])
+        if peer_info["cipher"]:
+            encrypted = peer_info["cipher"].encrypt(msg.encode())
+            sock.sendto(encrypted, peer_info["addr"])
 
 if __name__ == "__main__":
     start_p2p()
