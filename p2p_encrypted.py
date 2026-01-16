@@ -1,147 +1,96 @@
-import socket
-import threading
-import time
-import os
+import socket, threading, time, os
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-# --- CONFIG ---
 MATCHMAKER_IP = "35.209.155.240"
 MATCHMAKER_PORT = 10000
 LOCAL_PORT = 50005
 
-
-class SecureState:
-    def __init__(self):
-        self.peer_addr = None
-        self.shared_key = None
-        self.verified = False
-        self.my_private_key = x25519.X25519PrivateKey.generate()
-        self.my_public_bytes = self.my_private_key.public_key().public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw
-        )
+# Global state
+peer_info = {"addr": None, "key": None, "verified": False}
+my_priv = x25519.X25519PrivateKey.generate()
+my_pub = my_priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
 
 
-state = SecureState()
+def encrypt(msg):
+    aesgcm = AESGCM(peer_info["key"])
+    nonce = os.urandom(12)
+    return nonce + aesgcm.encrypt(nonce, msg.encode(), None)
 
 
-def derive_aes_key(shared_secret):
-    return HKDF(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=None,
-        info=b'p2p-chat-v1',
-    ).derive(shared_secret)
-
-
-def encrypt_msg(message_str):
-    aesgcm = AESGCM(state.shared_key)
-    nonce = os.urandom(12)  # GCM needs a unique 12-byte nonce per message
-    ciphertext = aesgcm.encrypt(nonce, message_str.encode(), None)
-    return nonce + ciphertext
-
-
-def decrypt_msg(raw_data):
-    aesgcm = AESGCM(state.shared_key)
-    nonce = raw_data[:12]
-    ciphertext = raw_data[12:]
-    return aesgcm.decrypt(nonce, ciphertext, None).decode()
+def decrypt(data):
+    aesgcm = AESGCM(peer_info["key"])
+    return aesgcm.decrypt(data[:12], data[12:], None).decode()
 
 
 def listen_loop(sock):
     while True:
         try:
             data, addr = sock.recvfrom(4096)
-            state.peer_addr = addr  # Update for NAT shifts
-
             if data.startswith(b"KEY:"):
-                peer_pub_raw = data[4:]
-                peer_public_key = x25519.X25519PublicKey.from_public_bytes(peer_pub_raw)
-                shared_secret = state.my_private_key.exchange(peer_public_key)
-                state.shared_key = derive_aes_key(shared_secret)
-                continue
-
-            if data.startswith(b"VFY:"):
-                if state.shared_key:
-                    try:
-                        if decrypt_msg(data[4:]) == "OK":
-                            state.verified = True
-                    except:
-                        pass
-                continue
-
-            if state.verified:
-                try:
-                    msg = decrypt_msg(data)
-                    print(f"\r[Peer]: {msg}\nYou: ", end="", flush=True)
-                except:
-                    pass
+                raw_pub = data[4:]
+                shared = my_priv.exchange(x25519.X25519PublicKey.from_public_bytes(raw_pub))
+                peer_info["key"] = HKDF(hashes.SHA256(), 32, None, b'p2p').derive(shared)
+            elif data.startswith(b"VFY:"):
+                if peer_info["key"] and decrypt(data[4:]) == "OK":
+                    peer_info["verified"] = True
+            elif peer_info["verified"]:
+                print(f"\r[Peer]: {decrypt(data)}\nYou: ", end="", flush=True)
         except:
-            break
-
-
-def safe_recv_matchmaker(sock):
-    """Loop until we get a valid IP:PORT string from the server."""
-    while True:
-        data, addr = sock.recvfrom(1024)
-        try:
-            decoded = data.decode('utf-8')
-            # The matchmaker response always contains a dot (IP) and a colon (Port)
-            if "." in decoded and ":" in decoded and "KEY:" not in decoded:
-                return decoded
-        except UnicodeDecodeError:
-            # This was a binary key packet from the peer, ignore it and keep waiting
             continue
 
 
 def start_p2p():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # Using 0 lets the OS pick a random free port if 50005 is busy,
+    # but LOCAL_PORT is fine for consistency.
     sock.bind(('0.0.0.0', LOCAL_PORT))
 
-    choice = input("Enter Room ID or press Enter to generate NEW: ").strip()
+    choice = input("Enter Room ID or press Enter for NEW: ").strip()
     sock.sendto(b"NEW" if not choice else f"JOIN:{choice}".encode(), (MATCHMAKER_IP, MATCHMAKER_PORT))
 
-    # Use the safe receiver instead of raw recvfrom
-    resp_data = safe_recv_matchmaker(sock)
-
-    if "ERROR" in resp_data: return print("Room not found.")
-
-    # If we created a room, the server sent "CREATED:abc-def-ghi"
-    if "CREATED" in resp_data:
-        room_id = resp_data.split(":")[1]
-        print(f"Room: {room_id}. Waiting for peer...")
-        # Now wait for the second packet which contains the peer's actual IP
-        peer_raw = safe_recv_matchmaker(sock)
-    else:
-        room_id = choice
-        peer_raw = resp_data
-    print(peer_raw)
-    ip, port = peer_raw.split(":")
-    state.peer_addr = (ip, int(port))
+    # --- PHASE 1: Get Room Info & Peer ---
+    while peer_info["addr"] is None:
+        raw, _ = sock.recvfrom(1024)
+        try:
+            msg = raw.decode()
+            if msg.startswith("INFO:"):
+                # Use [5:] to skip "INFO:"
+                print(f"Room created! ID: {msg[5:]}\nWaiting for friend...")
+            elif msg.startswith("PEER:"):
+                # Skip "PEER:" by taking everything after the first 5 characters
+                # Then split the remaining "91.200.10.124:50005"
+                peer_data = msg[5:]
+                parts = peer_data.split(":")
+                peer_info["addr"] = (parts[0], int(parts[1]))
+            elif "ERROR" in msg:
+                print("Room not found.");
+                return
+        except UnicodeDecodeError:
+            continue
 
     threading.Thread(target=listen_loop, args=(sock,), daemon=True).start()
 
-    # Handshake Loop (Increased delay slightly to reduce congestion)
-    print("Securing connection...")
-    while not state.verified:
-        sock.sendto(b"KEY:" + state.my_public_bytes, state.peer_addr)
-        if state.shared_key:
+    # --- PHASE 2: Secure Handshake ---
+    print(f"Peer found at {peer_info['addr']}. Securing connection...")
+    while not peer_info["verified"]:
+        sock.sendto(b"KEY:" + my_pub, peer_info["addr"])
+        if peer_info["key"]:
             try:
-                vfy_pkt = b"VFY:" + encrypt_msg("OK")
-                sock.sendto(vfy_pkt, state.peer_addr)
+                sock.sendto(b"VFY:" + encrypt("OK"), peer_info["addr"])
             except:
                 pass
-        time.sleep(0.6)
+        time.sleep(0.5)
 
-    print(f"--- SECURE CHANNEL READY (Room: {room_id}) ---")
+    print("--- SECURE CHANNEL READY ---")
     while True:
         msg = input("You: ")
         if msg.lower() == 'exit': break
-        sock.sendto(encrypt_msg(msg), state.peer_addr)
+        # Important: Don't send empty messages as they can break some decoders
+        if msg.strip():
+            sock.sendto(encrypt(msg), peer_info["addr"])
 
 
 if __name__ == "__main__":
