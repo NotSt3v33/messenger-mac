@@ -83,6 +83,20 @@ def listen_loop(sock):
             break
 
 
+def safe_recv_matchmaker(sock):
+    """Loop until we get a valid IP:PORT string from the server."""
+    while True:
+        data, addr = sock.recvfrom(1024)
+        try:
+            decoded = data.decode('utf-8')
+            # The matchmaker response always contains a dot (IP) and a colon (Port)
+            if "." in decoded and ":" in decoded and "KEY:" not in decoded:
+                return decoded
+        except UnicodeDecodeError:
+            # This was a binary key packet from the peer, ignore it and keep waiting
+            continue
+
+
 def start_p2p():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -91,34 +105,39 @@ def start_p2p():
     choice = input("Enter Room ID or press Enter to generate NEW: ").strip()
     sock.sendto(b"NEW" if not choice else f"JOIN:{choice}".encode(), (MATCHMAKER_IP, MATCHMAKER_PORT))
 
-    resp_data, _ = sock.recvfrom(1024)
-    resp = resp_data.decode()
-    if "ERROR" in resp: return print("Room not found.")
+    # Use the safe receiver instead of raw recvfrom
+    resp_data = safe_recv_matchmaker(sock)
 
-    room_id = resp.split(":")[1] if "CREATED" in resp else choice
-    print(f"Room: {room_id}. Waiting for peer...")
+    if "ERROR" in resp_data: return print("Room not found.")
 
-    peer_raw, _ = sock.recvfrom(1024)
-    ip, port = peer_raw.decode().split(":")
+    # If we created a room, the server sent "CREATED:abc-def-ghi"
+    if "CREATED" in resp_data:
+        room_id = resp_data.split(":")[1]
+        print(f"Room: {room_id}. Waiting for peer...")
+        # Now wait for the second packet which contains the peer's actual IP
+        peer_raw = safe_recv_matchmaker(sock)
+    else:
+        room_id = choice
+        peer_raw = resp_data
+
+    ip, port = peer_raw.split(":")
     state.peer_addr = (ip, int(port))
 
     threading.Thread(target=listen_loop, args=(sock,), daemon=True).start()
 
-    # Handshake Loop
+    # Handshake Loop (Increased delay slightly to reduce congestion)
     print("Securing connection...")
     while not state.verified:
-        # 1. Send Public Key
         sock.sendto(b"KEY:" + state.my_public_bytes, state.peer_addr)
-        # 2. If we have a key, send an encrypted Verify
         if state.shared_key:
             try:
                 vfy_pkt = b"VFY:" + encrypt_msg("OK")
                 sock.sendto(vfy_pkt, state.peer_addr)
             except:
                 pass
-        time.sleep(0.5)
+        time.sleep(0.6)
 
-    print(f"--- SECURE CHANNEL READY ---")
+    print(f"--- SECURE CHANNEL READY (Room: {room_id}) ---")
     while True:
         msg = input("You: ")
         if msg.lower() == 'exit': break
