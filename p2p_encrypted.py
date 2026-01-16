@@ -119,7 +119,7 @@ def start_p2p():
     else:
         room_id = choice
         peer_raw = resp_data
-
+    print(peer_raw)
     ip, port = peer_raw.split(":")
     state.peer_addr = (ip, int(port))
 
