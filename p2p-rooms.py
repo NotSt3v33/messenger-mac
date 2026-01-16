@@ -25,30 +25,47 @@ def listen_loop(sock):
 
 
 def start_p2p():
-    room_id = input("enter room id: ").strip()
-    if not room_id:
-        print("room ID not specified")
-        return
-
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(('0.0.0.0', LOCAL_PORT))
+
+    choice = input("enter room id or press enter to generate new: ").strip()
+    if not choice:
+        print("generating new...")
+        sock.sendto(b"NEW", (MATCHMAKER_IP, MATCHMAKER_PORT))
+        data, _ = sock.recvfrom(1024)
+        msg = data.decode()
+        if msg.startswith("CREATED:"):
+            room_id = msg.split(":")[1]
+            print(f"Room id: {room_id}")
+            print("give this to your peer.")
+        else:
+            print(f"Error creating room, got message: {msg}")
+            return
+    else:
+        room_id = choice
+        sock.sendto(f"JOIN:{room_id}".encode(), (MATCHMAKER_IP, MATCHMAKER_PORT))
 
     print(f"Connecting to server for room: {room_id}...")
     reg_msg = f"HELLO:{room_id}"
     sock.sendto(reg_msg.encode(), (MATCHMAKER_IP, MATCHMAKER_PORT))
 
     data, _ = sock.recvfrom(1024)
-    ip, port = data.decode('utf-8').split(":")
-    base_port = int(port)
-    peer_info["addr"] = (ip, base_port)
+    resp = data.decode()
+
+    if resp == "ERROR:NOT_FOUND":
+        print("Room not found or already matched.")
+        return
+
+    ip, port = resp.split(":")
+    peer_info["addr"] = (ip, int(port))
 
     threading.Thread(target=listen_loop, args=(sock,), daemon=True).start()
 
-    print(f"Server connection through {base_port}. Port scan on {ip}")
+    print(f"Server connection through {port}. Port scan on {ip}")
     for i in range(10):
         for offset in range(-2, 6):
-            sock.sendto(b"__portscan__", (ip, base_port + offset))
+            sock.sendto(b"__portscan__", (ip, int(port) + offset))
         time.sleep(0.3)
 
     print(f"---READY(Room:{room_id})---")
