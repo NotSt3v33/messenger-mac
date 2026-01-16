@@ -1,107 +1,129 @@
 import socket
 import threading
 import time
-import base64
-from cryptography.hazmat.primitives.asymmetric import dh
+import os
 from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-# Constants
+# --- CONFIG ---
 MATCHMAKER_IP = "35.209.155.240"
 MATCHMAKER_PORT = 10000
 LOCAL_PORT = 50005
 
-peer_info = {"addr": None, "cipher": None}
+
+class SecureState:
+    def __init__(self):
+        self.peer_addr = None
+        self.shared_key = None
+        self.verified = False
+        self.my_private_key = x25519.X25519PrivateKey.generate()
+        self.my_public_bytes = self.my_private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw
+        )
 
 
-def derive_key(shared_secret):
-    """Turns a raw DH shared secret into a 32-byte key for Fernet."""
-    return base64.urlsafe_b64encode(HKDF(
+state = SecureState()
+
+
+def derive_aes_key(shared_secret):
+    return HKDF(
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
-        info=b'handshake data',
-    ).derive(shared_secret))
+        info=b'p2p-chat-v1',
+    ).derive(shared_secret)
+
+
+def encrypt_msg(message_str):
+    aesgcm = AESGCM(state.shared_key)
+    nonce = os.urandom(12)  # GCM needs a unique 12-byte nonce per message
+    ciphertext = aesgcm.encrypt(nonce, message_str.encode(), None)
+    return nonce + ciphertext
+
+
+def decrypt_msg(raw_data):
+    aesgcm = AESGCM(state.shared_key)
+    nonce = raw_data[:12]
+    ciphertext = raw_data[12:]
+    return aesgcm.decrypt(nonce, ciphertext, None).decode()
 
 
 def listen_loop(sock):
     while True:
         try:
             data, addr = sock.recvfrom(4096)
+            state.peer_addr = addr  # Update for NAT shifts
 
-            # If we receive a Public Key, store it in peer_info
-            if data.startswith(b"PUB:"):
-                peer_info["raw_pub_key"] = data[4:]
-                # Update address just in case it's different
-                peer_info["addr"] = addr
+            if data.startswith(b"KEY:"):
+                peer_pub_raw = data[4:]
+                peer_public_key = x25519.X25519PublicKey.from_public_bytes(peer_pub_raw)
+                shared_secret = state.my_private_key.exchange(peer_public_key)
+                state.shared_key = derive_aes_key(shared_secret)
                 continue
 
-            if b"__portscan__" in data:
+            if data.startswith(b"VFY:"):
+                if state.shared_key:
+                    try:
+                        if decrypt_msg(data[4:]) == "OK":
+                            state.verified = True
+                    except:
+                        pass
                 continue
 
-            if peer_info["cipher"]:
+            if state.verified:
                 try:
-                    decrypted = peer_info["cipher"].decrypt(data).decode()
-                    print(f"\r[Peer]: {decrypted}\nYou: ", end="", flush=True)
+                    msg = decrypt_msg(data)
+                    print(f"\r[Peer]: {msg}\nYou: ", end="", flush=True)
                 except:
                     pass
         except:
             break
 
 
-# Add "raw_pub_key" to your global dictionary at the top
-peer_info = {"addr": None, "cipher": None, "raw_pub_key": None}
-
-
 def start_p2p():
-    room_id = input("Enter Room ID: ").strip()
-
-    print("Generating secure keys (512-bit)...")
-    parameters = dh.generate_parameters(generator=2, key_size=512)
-    private_key = parameters.generate_private_key()
-    public_key = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(('0.0.0.0', LOCAL_PORT))
 
-    sock.sendto(f"HELLO:{room_id}".encode(), (MATCHMAKER_IP, MATCHMAKER_PORT))
-    data, _ = sock.recvfrom(1024)
-    ip, port = data.decode('utf-8').split(":")
-    peer_info["addr"] = (ip, int(port))
+    choice = input("Enter Room ID or press Enter to generate NEW: ").strip()
+    sock.sendto(b"NEW" if not choice else f"JOIN:{choice}".encode(), (MATCHMAKER_IP, MATCHMAKER_PORT))
 
-    # Start the listener BEFORE we start the handshake loop
+    resp_data, _ = sock.recvfrom(1024)
+    resp = resp_data.decode()
+    if "ERROR" in resp: return print("Room not found.")
+
+    room_id = resp.split(":")[1] if "CREATED" in resp else choice
+    print(f"Room: {room_id}. Waiting for peer...")
+
+    peer_raw, _ = sock.recvfrom(1024)
+    ip, port = peer_raw.decode().split(":")
+    state.peer_addr = (ip, int(port))
+
     threading.Thread(target=listen_loop, args=(sock,), daemon=True).start()
 
-    print("Performing secure handshake...")
+    # Handshake Loop
+    print("Securing connection...")
+    while not state.verified:
+        # 1. Send Public Key
+        sock.sendto(b"KEY:" + state.my_public_bytes, state.peer_addr)
+        # 2. If we have a key, send an encrypted Verify
+        if state.shared_key:
+            try:
+                vfy_pkt = b"VFY:" + encrypt_msg("OK")
+                sock.sendto(vfy_pkt, state.peer_addr)
+            except:
+                pass
+        time.sleep(0.5)
 
-    # LOOP UNTIL the listen_loop catches the key
-    while peer_info["raw_pub_key"] is None:
-        for offset in range(-2, 6):
-            target = (ip, int(port) + offset)
-            sock.sendto(b"PUB:" + public_key, target)
-            sock.sendto(b"__portscan__", target)
-
-        print("Waiting for peer key...")
-        time.sleep(1)  # Wait 1 second before blasting the ports again
-
-    # Finalize Encryption using the key the listener caught
-    peer_public_key = serialization.load_pem_public_key(peer_info["raw_pub_key"])
-    shared_secret = private_key.exchange(peer_public_key)
-    peer_info["cipher"] = Fernet(derive_key(shared_secret))
-
-    print(f"--- SECURE CHANNEL ESTABLISHED (Room:{room_id}) ---")
-
+    print(f"--- SECURE CHANNEL READY ---")
     while True:
         msg = input("You: ")
         if msg.lower() == 'exit': break
-        if peer_info["cipher"]:
-            encrypted = peer_info["cipher"].encrypt(msg.encode())
-            sock.sendto(encrypted, peer_info["addr"])
+        sock.sendto(encrypt_msg(msg), state.peer_addr)
+
 
 if __name__ == "__main__":
     start_p2p()
