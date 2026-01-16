@@ -1,1 +1,2 @@
 lg2 clone https://github.com/NotSt3v33/messenger-mac.git
+TODO: automatic updates of server code from github triggered by git push
