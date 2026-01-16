@@ -72,17 +72,41 @@ def start_p2p():
             continue
 
     threading.Thread(target=listen_loop, args=(sock,), daemon=True).start()
-
+    import pprint
     # --- PHASE 2: Secure Handshake ---
-    print(f"Peer found at {peer_info['addr']}. Securing connection...")
+    print(f"DEBUG: Starting handshake for {peer_info['addr']}")
+    print(f"DEBUG: Initial peer_info state: {pprint.pformat(peer_info)}")
+
     while not peer_info["verified"]:
-        sock.sendto(b"KEY:" + my_pub, peer_info["addr"])
+        print(f"\n--- Loop Tick: {time.time()} ---")
+
+        # 1. Check sending the key
+        print(f"DEBUG: Attempting to send KEY to {peer_info['addr']}...")
+        try:
+            sock.sendto(b"KEY:" + my_pub, peer_info["addr"])
+            print("DEBUG: KEY packet sent successfully.")
+        except Exception as e:
+            print(f"DEBUG ERROR: Failed to send KEY: {e}")
+
+        # 2. Check if we have the peer's key yet
         if peer_info["key"]:
+            print(f"DEBUG: Peer key found. Attempting VFY message...")
             try:
-                sock.sendto(b"VFY:" + encrypt("OK"), peer_info["addr"])
-            except:
-                pass
+                encrypted_msg = encrypt("OK")
+                sock.sendto(b"VFY:" + encrypted_msg, peer_info["addr"])
+                print("DEBUG: VFY packet sent.")
+            except Exception as e:
+                # This 'except' was hiding errors before!
+                print(f"DEBUG ERROR: Encryption or VFY send failed: {e}")
+        else:
+            print("DEBUG: Still waiting to receive peer's key (peer_info['key'] is empty).")
+
+        # 3. Check the verified status again
+        print(f"DEBUG: Current verification status: {peer_info['verified']}")
+
         time.sleep(0.5)
+
+    print("DEBUG: Loop exited! Connection is verified.")
 
     print("--- SECURE CHANNEL READY ---")
     while True:
