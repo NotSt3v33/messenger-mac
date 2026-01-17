@@ -13,12 +13,15 @@ peer_info = {"addr": None}
 def listen_loop(sock):
     while True:
         try:
-            data, addr = sock.recvfrom(2048)
-            if peer_info["addr"] != addr:
-                peer_info["addr"] = addr
+            data, addr = sock.recvfrom(4096)
+            # Ignore messages from the matchmaker once we are in P2P mode
+            if addr == (MATCHMAKER_IP, MATCHMAKER_PORT):
+                continue
 
             msg = data.decode('utf-8', errors='ignore')
-            if "__portscan__" in msg: continue
+            if msg == "__ping__":
+                continue
+
             print(f"\r[Peer]: {msg}\nYou: ", end="", flush=True)
         except:
             break
@@ -26,53 +29,55 @@ def listen_loop(sock):
 
 def start_p2p():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # Allow port reuse in case of quick restarts
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(('0.0.0.0', LOCAL_PORT))
 
-    choice = input("enter room id or press enter to generate new: ").strip()
-    if not choice:
-        print("generating new...")
-        sock.sendto(b"NEW", (MATCHMAKER_IP, MATCHMAKER_PORT))
+    choice = input("Enter Room ID or press Enter for NEW: ").strip()
+
+    # Phase 1: Contact Matchmaker
+    command = b"NEW" if not choice else f"JOIN:{choice}".encode()
+    sock.sendto(command, (MATCHMAKER_IP, MATCHMAKER_PORT))
+
+    # Phase 2: Wait for Peer Info
+    print("Waiting for peer information from server...")
+    while peer_info["addr"] is None:
         data, _ = sock.recvfrom(1024)
-        msg = data.decode()
-        if msg.startswith("CREATED:"):
-            room_id = msg.split(":")[1]
-            print(f"Room id: {room_id}")
-            print("give this to your peer.")
-        else:
-            print(f"Error creating room, got message: {msg}")
+        msg = data.decode(errors='ignore')
+
+        if msg.startswith("INFO:"):
+            print(f"Room created! ID: {msg[5:]}\nWaiting for friend...")
+        elif msg.startswith("PEER:"):
+            # Format is PEER:IP:PORT
+            peer_data = msg[5:]
+            parts = peer_data.split(":")
+            peer_info["addr"] = (parts[0], int(parts[1]))
+            print(f"Peer found at {peer_info['addr']}")
+        elif "ERROR" in msg:
+            print("Room error: Not found or full.")
             return
-    else:
-        room_id = choice
-        sock.sendto(f"JOIN:{room_id}".encode(), (MATCHMAKER_IP, MATCHMAKER_PORT))
 
-    print(f"Connecting to server for room: {room_id}...")
-    reg_msg = f"HELLO:{room_id}"
-    sock.sendto(reg_msg.encode(), (MATCHMAKER_IP, MATCHMAKER_PORT))
-
-    data, _ = sock.recvfrom(1024)
-    resp = data.decode()
-
-    if resp == "ERROR:NOT_FOUND":
-        print("Room not found or already matched.")
-        return
-
-    ip, port = resp.split(":")
-    peer_info["addr"] = (ip, int(port))
-
+    # Start listener thread
     threading.Thread(target=listen_loop, args=(sock,), daemon=True).start()
 
-    print(f"Server connection through {port}. Port scan on {ip}")
-    for i in range(10):
-        for offset in range(-2, 6):
-            sock.sendto(b"__portscan__", (ip, int(port) + offset))
-        time.sleep(0.3)
+    # Phase 3: UDP Hole Punching (The "Handshake")
+    # We send pings to open the NAT firewall
+    print("Establishing P2P connection...")
+    for _ in range(5):
+        sock.sendto(b"__ping__", peer_info["addr"])
+        time.sleep(0.2)
 
-    print(f"---READY(Room:{room_id})---")
+    print("--- SECURE CHANNEL READY (UNENCRYPTED) ---")
     while True:
-        msg = input("You: ")
-        if msg.lower() == 'exit': break
-        sock.sendto(msg.encode('utf-8'), peer_info["addr"])
+        try:
+            msg = input("You: ")
+            if msg.lower() == 'exit':
+                break
+            if msg.strip():
+                sock.sendto(msg.encode('utf-8'), peer_info["addr"])
+        except KeyboardInterrupt:
+            break
+
 
 if __name__ == "__main__":
     start_p2p()
