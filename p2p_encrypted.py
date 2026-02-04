@@ -87,7 +87,7 @@ def start_p2p():
     print(f"DEBUG: Starting handshake for {peer_info['addr']}")
     print(f"DEBUG: Initial peer_info state: {pprint.pformat(peer_info)}")
 
-    while not peer_info["verified"]:
+    while not peer_info.get("verified"):
         print(f"\n--- Loop Tick: {time.time()} ---")
 
         # 1. Check sending the key
