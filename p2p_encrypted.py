@@ -3,6 +3,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import pprint
 
 MATCHMAKER_IP = "35.209.155.240"
 MATCHMAKER_PORT = 10000
@@ -29,28 +30,39 @@ def listen_loop(sock):
     while True:
         try:
             data, addr = sock.recvfrom(4096)
+            if data == b"PUNCH": continue
 
-            if data == b"PUNCH":  # Ignore the hole-punching noise
-                continue
             if data.startswith(b"KEY:"):
                 raw_pub = data[4:]
                 shared = my_priv.exchange(x25519.X25519PublicKey.from_public_bytes(raw_pub))
                 peer_info["key"] = HKDF(hashes.SHA256(), 32, None, b'p2p').derive(shared)
-                # New: Immediate reply so they don't stay stuck
+                # Reply so they get our key too
                 sock.sendto(b"KEY:" + my_pub, addr)
+
+
             elif data.startswith(b"VFY:"):
-                if peer_info["key"] and decrypt(data[4:]) == "OK":
-                    peer_info["verified"] = True
+                if peer_info["key"]:
+                    try:
+                        if decrypt(data[4:]) == "OK":
+                            # Only reply if we weren't verified yet to stop the loop
+                            if not peer_info["verified"]:
+                                peer_info["verified"] = True
+                                sock.sendto(b"VFY:" + encrypt("OK"), addr)
+                    except:
+                        pass
             elif peer_info["verified"]:
-                print(f"\r[Peer]: {decrypt(data)}\nYou: ", end="", flush=True)
-        except:
-            continue
+                try:
+                    print(f"\r[Peer]: {decrypt(data)}\nYou: ", end="", flush=True)
+                except:
+                    pass
+        except Exception as e:
+            print(f"Socket Error: {e}")
+            break
 
 
 def start_p2p():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    # Using 0 lets the OS pick a random free port if 50005 is busy,
-    # but LOCAL_PORT is fine for consistency.
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # Added this
     sock.bind(('0.0.0.0', LOCAL_PORT))
 
     choice = input("Enter Room ID or press Enter for NEW: ").strip()
@@ -77,8 +89,8 @@ def start_p2p():
         except UnicodeDecodeError:
             continue
 
-    threading.Thread(target=listen_loop, args=(sock,), daemon=True).start()
-    import pprint
+    #sock.sendto(b"PUNCH", (MATCHMAKER_IP, MATCHMAKER_PORT))
+
     print("Punching hole in NAT...")
     for _ in range(10):  # Hammer it 10 times
         sock.sendto(b"PUNCH", peer_info["addr"])
