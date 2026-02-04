@@ -29,6 +29,8 @@ def listen_loop(sock):
     while True:
         try:
             data, addr = sock.recvfrom(4096)
+            if data == b"PUNCH":  # Ignore the hole-punching noise
+                continue
             if data.startswith(b"KEY:"):
                 raw_pub = data[4:]
                 shared = my_priv.exchange(x25519.X25519PublicKey.from_public_bytes(raw_pub))
@@ -56,6 +58,7 @@ def start_p2p():
         raw, _ = sock.recvfrom(1024)
         try:
             msg = raw.decode()
+            print(f"DEBUG: Received message: {msg}")
             if msg.startswith("INFO:"):
                 # Use [5:] to skip "INFO:"
                 print(f"Room created! ID: {msg[5:]}\nWaiting for friend...")
@@ -73,6 +76,13 @@ def start_p2p():
 
     threading.Thread(target=listen_loop, args=(sock,), daemon=True).start()
     import pprint
+    print("Punching hole in NAT...")
+    for _ in range(10):  # Hammer it 10 times
+        sock.sendto(b"PUNCH", peer_info["addr"])
+        time.sleep(0.1)
+
+    # Now start the listener
+    threading.Thread(target=listen_loop, args=(sock,), daemon=True).start()
     # --- PHASE 2: Secure Handshake ---
     print(f"DEBUG: Starting handshake for {peer_info['addr']}")
     print(f"DEBUG: Initial peer_info state: {pprint.pformat(peer_info)}")
