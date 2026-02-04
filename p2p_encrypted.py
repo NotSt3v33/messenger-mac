@@ -29,12 +29,15 @@ def listen_loop(sock):
     while True:
         try:
             data, addr = sock.recvfrom(4096)
+
             if data == b"PUNCH":  # Ignore the hole-punching noise
                 continue
             if data.startswith(b"KEY:"):
                 raw_pub = data[4:]
                 shared = my_priv.exchange(x25519.X25519PublicKey.from_public_bytes(raw_pub))
                 peer_info["key"] = HKDF(hashes.SHA256(), 32, None, b'p2p').derive(shared)
+                # New: Immediate reply so they don't stay stuck
+                sock.sendto(b"KEY:" + my_pub, addr)
             elif data.startswith(b"VFY:"):
                 if peer_info["key"] and decrypt(data[4:]) == "OK":
                     peer_info["verified"] = True
